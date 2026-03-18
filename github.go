@@ -1,13 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
-
-	"github.com/google/go-github/v84/github"
 )
+
+const graphqlEndpoint = "https://api.github.com/graphql"
+
+const prQuery = `query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        author { login }
+        isDraft
+        reviewDecision
+      }
+    }
+  }
+}`
 
 type PRInfo struct {
 	Repo         string
@@ -15,10 +33,10 @@ type PRInfo struct {
 	Number       int
 	Author       string
 	Draft        bool
-	ReviewStatus string // "approved", "changes_requested", "pending"
+	ReviewStatus string // "approved", "changes_requested", "review_required", "pending"
 }
 
-func collectPRs(ctx context.Context, client *github.Client, repos []string) []PRInfo {
+func collectPRs(ctx context.Context, token string, repos []string) []PRInfo {
 	var result []PRInfo
 	for _, repo := range repos {
 		owner, name, ok := parseRepo(repo)
@@ -26,9 +44,9 @@ func collectPRs(ctx context.Context, client *github.Client, repos []string) []PR
 			log.Printf("skipping invalid repo %q (expected owner/repo)", repo)
 			continue
 		}
-		prs, err := listOpenPRs(ctx, client, owner, name)
+		prs, err := queryOpenPRs(ctx, token, owner, name)
 		if err != nil {
-			log.Printf("error listing PRs for %s: %v", repo, err)
+			log.Printf("error querying PRs for %s: %v", repo, err)
 			continue
 		}
 		result = append(result, prs...)
@@ -44,74 +62,111 @@ func parseRepo(repo string) (owner, name string, ok bool) {
 	return parts[0], parts[1], true
 }
 
-func listOpenPRs(ctx context.Context, client *github.Client, owner, repo string) ([]PRInfo, error) {
+type graphqlRequest struct {
+	Query     string         `json:"query"`
+	Variables map[string]any `json:"variables"`
+}
+
+type graphqlResponse struct {
+	Data struct {
+		Repository struct {
+			PullRequests struct {
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+				Nodes []struct {
+					Number         int    `json:"number"`
+					Author         struct{ Login string } `json:"author"`
+					IsDraft        bool   `json:"isDraft"`
+					ReviewDecision string `json:"reviewDecision"`
+				} `json:"nodes"`
+			} `json:"pullRequests"`
+		} `json:"repository"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+func queryOpenPRs(ctx context.Context, token, owner, name string) ([]PRInfo, error) {
 	var result []PRInfo
-	opts := &github.PullRequestListOptions{
-		State:       "open",
-		ListOptions: github.ListOptions{PerPage: 100},
-	}
+	var cursor *string
+
 	for {
-		prs, resp, err := client.PullRequests.List(ctx, owner, repo, opts)
-		if err != nil {
-			return nil, fmt.Errorf("list PRs: %w", err)
+		vars := map[string]any{"owner": owner, "name": name}
+		if cursor != nil {
+			vars["cursor"] = *cursor
 		}
-		for _, pr := range prs {
-			reviewStatus := getReviewStatus(ctx, client, owner, repo, pr.GetNumber())
+
+		resp, err := doGraphQL(ctx, token, graphqlRequest{Query: prQuery, Variables: vars})
+		if err != nil {
+			return nil, err
+		}
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("graphql: %s", resp.Errors[0].Message)
+		}
+
+		prs := resp.Data.Repository.PullRequests
+		for _, node := range prs.Nodes {
 			result = append(result, PRInfo{
-				Repo:         repo,
+				Repo:         name,
 				Owner:        owner,
-				Number:       pr.GetNumber(),
-				Author:       pr.GetUser().GetLogin(),
-				Draft:        pr.GetDraft(),
-				ReviewStatus: reviewStatus,
+				Number:       node.Number,
+				Author:       node.Author.Login,
+				Draft:        node.IsDraft,
+				ReviewStatus: mapReviewDecision(node.ReviewDecision),
 			})
 		}
-		if resp.NextPage == 0 {
+
+		if !prs.PageInfo.HasNextPage {
 			break
 		}
-		opts.Page = resp.NextPage
+		cursor = &prs.PageInfo.EndCursor
 	}
 	return result, nil
 }
 
-func getReviewStatus(ctx context.Context, client *github.Client, owner, repo string, prNumber int) string {
-	opts := &github.ListOptions{PerPage: 100}
-	// Track the latest review state per user.
-	latestByUser := make(map[string]string)
-	for {
-		reviews, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, opts)
-		if err != nil {
-			log.Printf("error listing reviews for %s/%s#%d: %v", owner, repo, prNumber, err)
-			return "pending"
-		}
-		for _, r := range reviews {
-			user := r.GetUser().GetLogin()
-			state := r.GetState() // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
-			// Only track actionable states.
-			switch state {
-			case "APPROVED", "CHANGES_REQUESTED":
-				latestByUser[user] = state
-			case "DISMISSED":
-				delete(latestByUser, user)
-			}
-		}
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
+func doGraphQL(ctx context.Context, token string, payload graphqlRequest) (*graphqlResponse, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	hasApproval := false
-	for _, state := range latestByUser {
-		if state == "CHANGES_REQUESTED" {
-			return "changes_requested"
-		}
-		if state == "APPROVED" {
-			hasApproval = true
-		}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, graphqlEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
 	}
-	if hasApproval {
+	req.Header.Set("Authorization", "bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("github returned %d: %s", resp.StatusCode, b)
+	}
+
+	var result graphqlResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func mapReviewDecision(decision string) string {
+	switch decision {
+	case "APPROVED":
 		return "approved"
+	case "CHANGES_REQUESTED":
+		return "changes_requested"
+	case "REVIEW_REQUIRED":
+		return "review_required"
+	default:
+		return "pending"
 	}
-	return "pending"
 }

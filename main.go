@@ -9,9 +9,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/google/go-github/v84/github"
-	"golang.org/x/oauth2"
 )
 
 type Config struct {
@@ -78,13 +75,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.GitHubToken})
-	ghClient := github.NewClient(oauth2.NewClient(ctx, ts))
-
 	log.Printf("starting github PR exporter for %d repos, poll interval %s", len(cfg.Repos), cfg.PollInterval)
 
 	run := func() {
-		prs := collectPRs(ctx, ghClient, cfg.Repos)
+		prs := collectPRs(ctx, cfg.GitHubToken, cfg.Repos)
 		log.Printf("collected %d open PRs", len(prs))
 
 		data := buildWriteRequest(prs)
