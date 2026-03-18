@@ -31,3 +31,23 @@ To stop:
 ```bash
 docker compose down
 ```
+
+## Local testing with Prometheus and Grafana
+
+The `example/` directory contains a compose stack that runs the exporter alongside Prometheus and Grafana so you can test everything locally without a Grafana Cloud account.
+
+1. Set up the env file with just your GitHub token:
+
+```bash
+cd example
+cp .env.example .env
+# edit .env — only GITHUB_TOKEN and GITHUB_REPOS are needed
+```
+
+2. Start the stack:
+
+```bash
+docker compose up --build
+```
+
+3. Open Grafana at http://localhost:3000 (no login required) and explore the `github_pr_open` metric via the pre-configured Prometheus datasource. Prometheus UI is at http://localhost:9090.

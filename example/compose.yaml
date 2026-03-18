@@ -1,0 +1,33 @@
+services:
+  exporter:
+    build: ..
+    env_file: .env
+    environment:
+      REMOTE_WRITE_URL: http://prometheus:9090/api/v1/write
+      REMOTE_WRITE_USERNAME: unused
+      REMOTE_WRITE_PASSWORD: unused
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
