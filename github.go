@@ -47,6 +47,11 @@ func collectPRs(ctx context.Context, token string, repos []string) []PRInfo {
 		prs, err := queryOpenPRs(ctx, token, owner, name)
 		if err != nil {
 			log.Printf("error querying PRs for %s: %v", repo, err)
+			result = append(result, PRInfo{
+				Repo:         name,
+				Owner:        owner,
+				ReviewStatus: "fetch_error",
+			})
 			continue
 		}
 		result = append(result, prs...)

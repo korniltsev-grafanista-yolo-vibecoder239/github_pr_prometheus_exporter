@@ -66,14 +66,26 @@ func TestCollectPRs(t *testing.T) {
 	token := getToken(t)
 	prs := collectPRs(context.Background(), token, []string{"golang/go", "invalid", "also/nonexistent-repo-xyz"})
 
-	// Should get results from golang/go and skip invalid repos gracefully.
+	// Should get results from golang/go plus a fetch_error entry for the nonexistent repo.
 	if len(prs) == 0 {
-		t.Fatal("expected at least one PR from golang/go")
+		t.Fatal("expected at least one PR")
 	}
+
+	var gotFetchError bool
 	for _, pr := range prs {
+		if pr.ReviewStatus == "fetch_error" {
+			gotFetchError = true
+			if pr.Owner != "also" || pr.Repo != "nonexistent-repo-xyz" {
+				t.Errorf("fetch_error PR has unexpected repo %s/%s", pr.Owner, pr.Repo)
+			}
+			continue
+		}
 		if pr.Owner != "golang" || pr.Repo != "go" {
 			t.Errorf("unexpected repo %s/%s in results", pr.Owner, pr.Repo)
 		}
+	}
+	if !gotFetchError {
+		t.Error("expected a fetch_error entry for nonexistent repo")
 	}
 }
 
