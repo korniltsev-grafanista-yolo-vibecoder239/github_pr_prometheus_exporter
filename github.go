@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/google/go-github/v68/github"
+	"github.com/google/go-github/v84/github"
 )
 
 type PRInfo struct {
